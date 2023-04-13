@@ -32,6 +32,7 @@ extensions [profiler]
 
 globals [
   foraging-area                ; position of the center of the foraging area
+  foraging-radius              ; radius around the foraging area center to place resource cells
   turn-ang-alpha-search        ; turning angle gamma distribution alpha parameter for bats which are searching
   turn-ang-lambda-search       ; turning angle gamma distribution lambda parameter for bats which are searching
   turn-ang-alpha-hunt          ; turning angle gamma distribution alpha parameter for bats which are hunting
@@ -41,6 +42,9 @@ globals [
   step-len-alpha-hunt          ; step length gamma distribution alpha parameter for bats which are hunting
   step-len-lambda-hunt         ; step length gamma distribution lambda parameter for bats which are hunting
   prey-detection-range         ; radius where prey can be detected [m]
+  attraction-range             ; maximum range where attraction occurs [m]
+  avoidance-range              ; range where avoidance is at its maximum [m]
+
 
   ; for scenarios
   run-done                     ; boolean which triggers when run is complete
@@ -135,6 +139,8 @@ to setup
   set step-len-alpha-hunt 1.5
   set step-len-lambda-hunt 6.7
   set prey-detection-range (15 / 75) + 0.5
+  set attraction-range 240
+  set avoidance-range 0.01
   set run-done false
   set most-done false
   set food-found-ticks-list []
@@ -231,9 +237,9 @@ to go
 
   ask bats with [food-found = true] [ hunting-fly ]           ; hunting bats fly around in their food cell
 
-  if ( ticks >= 8 ) [ ;and ( remainder ticks  8 ) = 0 [          ; collect these outputs once per every 8 ticks
+  if ( ticks >= 8 ) [
     if null-model? = false [ calculate-network-size ]         ; network size estimation (and coloration)
- ;   update-monitors                                           ; plot outputs
+    update-monitors                                           ; plot outputs
     collect-outputs                                           ; collect additional outputs
   ]
 
@@ -270,6 +276,7 @@ to setup-maps
 
   ; patch generation steps:
   set foraging-area patch 0 0                                ; select position of center of foraging area
+  set foraging-radius 35
   ask foraging-area [
     let patch-no no-patch                                    ; create a number of patches equal to the slider value
     while [patch-no > 0]                                     ; go through a loop to select the center of each food patch
@@ -660,36 +667,30 @@ end
 ; bats which found a food cell fly around - using same process as random-walk procedure
 to hunting-fly
 
-  ifelse hunt-fly? = true
-  [
-    ; set one heading as current heading
-    let heading-rw-head heading
-    ; set other heading towards center of food cell
-    let target food-cell
-    let heading-rw-cell towardsxy (item 0 target + random-float 0.1 - random-float 0.1) (item 1 target + random-float 0.1 - random-float 0.1)
+  ; set one heading as current heading
+  let heading-rw-head heading
+  ; set other heading towards center of food cell
+  let target food-cell
+  let heading-rw-cell towardsxy (item 0 target + random-float 0.1 - random-float 0.1) (item 1 target + random-float 0.1 - random-float 0.1)
 
-    let dist-cell 0
-    let rad1 0.1    ; inner radius (only current heading)
-    let rad2 0.5    ; outer radius (only cell center)
-    ifelse (((distancexy (item 0 target)(item 1 target) - rad1) < (rad2 - rad1)) and (distancexy (item 0 target)(item 1 target) > rad1))[ ; if not within foraging region but closer than the max distance to a side
-      set dist-cell (distancexy (item 0 target)(item 1 target) - rad1) / (rad2 - rad1) ; weigh RW vector magnitude based on distance
-    ]
-    [
-      ifelse (distancexy (item 0 target)(item 1 target) < rad1) [ set dist-cell 0 ] [ set dist-cell 1 ]
-    ]
-
-    let head heading-rw-head + (dist-cell * (subtract-headings heading-rw-cell heading-rw-head))
-
-    ; turning angles and step lengths based on hunting movements from data fit with a gamma distribution
-    set turning-angle ((0 + ( random-gamma turn-ang-alpha-hunt turn-ang-lambda-hunt ) - ( random-gamma turn-ang-alpha-hunt turn-ang-lambda-hunt )) * (180 / pi))
-    set heading head + turning-angle
-
-    fd step-length  ; fly forward
+  let dist-cell 0
+  let rad1 0.1    ; inner radius (only current heading)
+  let rad2 0.5    ; outer radius (only cell center)
+  ifelse (((distancexy (item 0 target)(item 1 target) - rad1) < (rad2 - rad1)) and (distancexy (item 0 target)(item 1 target) > rad1))[ ; if not within foraging region but closer than the max distance to a side
+    set dist-cell (distancexy (item 0 target)(item 1 target) - rad1) / (rad2 - rad1) ; weigh RW vector magnitude based on distance
   ]
   [
-    ; if hunt-fly is false bats instead just wiggle around in the center of the food cell
-    set heading heading + ((0 + ( random-gamma turn-ang-alpha-hunt turn-ang-lambda-hunt ) - ( random-gamma turn-ang-alpha-hunt turn-ang-lambda-hunt )) * (180 / pi))
+    ifelse (distancexy (item 0 target)(item 1 target) < rad1) [ set dist-cell 0 ] [ set dist-cell 1 ]
   ]
+
+  let head heading-rw-head + (dist-cell * (subtract-headings heading-rw-cell heading-rw-head))
+
+  ; turning angles and step lengths based on hunting movements from data fit with a gamma distribution
+  set turning-angle ((0 + ( random-gamma turn-ang-alpha-hunt turn-ang-lambda-hunt ) - ( random-gamma turn-ang-alpha-hunt turn-ang-lambda-hunt )) * (180 / pi))
+  set heading head + turning-angle
+
+  fd step-length  ; fly forward
+
 end
 
 
@@ -708,7 +709,7 @@ to food-check
         set food-found-this-tick true
       ]
       ; if food has already been found, check for empty cells in the same patch
-      if [found] of patch-here = true and bats-per-patch? = true and null-model? = false and no-patch != no-food-cells and flying-towards-food = false [
+      if [found] of patch-here = true and null-model? = false and no-patch != no-food-cells and flying-towards-food = false [
         let pid [patch-id] of patch-here
         let nP count patches with [patch-id = pid and found = false]
 
@@ -723,38 +724,37 @@ to food-check
 
     [
       ; if food is not here
-      if check-radius? = true [
-        ; check in detection radius
-        if any? patches in-radius prey-detection-range with [food = true] [
-          let in-r-cells patches in-radius prey-detection-range with [food = true]
-          ifelse any? in-r-cells with [found = false] [
-            ; if there are empty cells, target one
-            let tP one-of patches in-radius prey-detection-range with [food = true and found = false]
-            set targ-cell tP
-            set flying-towards-food true
-          ]
-          [
-            if bats-per-patch? = true and null-model? = false and no-patch != no-food-cells and flying-towards-food = false [
-              ; if there are empty cells in a detected patch, target one
-              let pid [patch-id] of in-r-cells
-              let pos-cell []
-              ask in-r-cells [
-                let myID patch-id
-                if any? patches with [patch-id = myID and found = false] [
-                  set pos-cell lput myID pos-cell
-                ]
+      ; check in detection radius
+      if any? patches in-radius prey-detection-range with [food = true] [
+        let in-r-cells patches in-radius prey-detection-range with [food = true]
+        ifelse any? in-r-cells with [found = false] [
+          ; if there are empty cells, target one
+          let tP one-of patches in-radius prey-detection-range with [food = true and found = false]
+          set targ-cell tP
+          set flying-towards-food true
+        ]
+        [
+          if null-model? = false and no-patch != no-food-cells and flying-towards-food = false [
+            ; if there are empty cells in a detected patch, target one
+            let pid [patch-id] of in-r-cells
+            let pos-cell []
+            ask in-r-cells [
+              let myID patch-id
+              if any? patches with [patch-id = myID and found = false] [
+                set pos-cell lput myID pos-cell
               ]
-              if not empty? pos-cell [
-                let tP one-of patches with [member? patch-id pos-cell and found = false]
-                set targ-cell tP
-                set flying-towards-food true
-              ]
+            ]
+            if not empty? pos-cell [
+              let tP one-of patches with [member? patch-id pos-cell and found = false]
+              set targ-cell tP
+              set flying-towards-food true
             ]
           ]
         ]
       ]
     ]
   ]
+
 
   ; update parameters when food is found
   if food-found-this-tick = true [
@@ -1042,10 +1042,10 @@ to movement-outputs
 end
 @#$#@#$#@
 GRAPHICS-WINDOW
-210
-10
-704
-505
+236
+103
+730
+598
 -1
 -1
 6.0
@@ -1069,11 +1069,11 @@ ticks
 30.0
 
 BUTTON
-14
-10
-78
-43
-NIL
+263
+37
+408
+82
+Setup
 Setup
 NIL
 1
@@ -1086,11 +1086,11 @@ NIL
 1
 
 BUTTON
-80
-10
-143
-43
-NIL
+408
+37
+553
+82
+Go (once)
 Go
 NIL
 1
@@ -1103,11 +1103,11 @@ NIL
 1
 
 BUTTON
-145
-10
-208
-43
-NIL
+553
+37
+698
+82
+Go (∞)
 Go
 T
 1
@@ -1120,10 +1120,10 @@ NIL
 1
 
 PLOT
-709
-261
-1192
-381
+759
+221
+1242
+341
 Network size
 NIL
 NIL
@@ -1138,40 +1138,10 @@ PENS
 "default" 1.0 0 -16777216 true "" ""
 
 SLIDER
-18
-100
-190
-133
-attraction-range
-attraction-range
-0
-500
-240.0
-5
-1
-m
-HORIZONTAL
-
-SLIDER
-18
-209
-192
-242
-avoidance-range
-avoidance-range
-0.01
-200
-0.01
-0.01
-1
-m
-HORIZONTAL
-
-SLIDER
-18
-137
-191
-170
+28
+394
+206
+427
 alignment-range-search
 alignment-range-search
 0
@@ -1183,10 +1153,10 @@ m
 HORIZONTAL
 
 SLIDER
-18
-62
-190
-95
+28
+142
+200
+175
 n-bats
 n-bats
 80
@@ -1198,10 +1168,10 @@ NIL
 HORIZONTAL
 
 PLOT
-709
-141
-938
-261
+759
+101
+988
+221
 Count bats which found food
 NIL
 NIL
@@ -1216,10 +1186,10 @@ PENS
 "default" 1.0 0 -16777216 true "" "plot count bats with [food-found = true]"
 
 SLIDER
-15
-259
-187
-292
+28
+48
+200
+81
 no-patch
 no-patch
 1
@@ -1231,10 +1201,10 @@ NIL
 HORIZONTAL
 
 SLIDER
-15
-296
-187
-329
+28
+81
+200
+114
 no-food-cells
 no-food-cells
 1
@@ -1246,10 +1216,10 @@ NIL
 HORIZONTAL
 
 SLIDER
-18
-173
-191
+28
+426
 206
+459
 alignment-range-hunt
 alignment-range-hunt
 0
@@ -1261,30 +1231,30 @@ m
 HORIZONTAL
 
 TEXTBOX
-24
-45
-174
-63
-Bat parameters:
+34
+125
+184
+143
+Bat variables:
 11
 0.0
 1
 
 TEXTBOX
-21
-244
-171
-262
-Map parameters:
+34
+33
+184
+51
+Landscape variables:
 11
 0.0
 1
 
 PLOT
-713
-382
-1194
-502
+759
+341
+1243
+461
 Ticks which bats found food
 NIL
 NIL
@@ -1299,21 +1269,21 @@ PENS
 "default" 1.0 1 -16777216 true "" ""
 
 SWITCH
-14
-441
-186
-474
+28
+264
+200
+297
 null-model?
 null-model?
-1
+0
 1
 -1000
 
 PLOT
-937
-141
-1192
-261
+987
+101
+1242
+221
 Percent of searching bats with a conspecific
 NIL
 NIL
@@ -1328,30 +1298,20 @@ PENS
 "default" 1.0 0 -16777216 true "" ""
 
 CHOOSER
-15
-376
-107
-421
+231
+651
+323
+696
 debug
 debug
 0 1 2 3 4
 0
 
-TEXTBOX
-17
-426
-167
-444
-For scenarios:
-11
-0.0
-1
-
 SWITCH
-15
-476
-187
-509
+28
+296
+200
+329
 track-bats?
 track-bats?
 0
@@ -1359,10 +1319,10 @@ track-bats?
 -1000
 
 SLIDER
-15
-511
-187
-544
+28
+328
+200
+361
 n-track-bats
 n-track-bats
 0
@@ -1374,10 +1334,10 @@ NIL
 HORIZONTAL
 
 INPUTBOX
-707
-10
-804
-70
+28
+458
+117
+518
 attract-mod-search
 0.006
 1
@@ -1385,10 +1345,10 @@ attract-mod-search
 Number
 
 INPUTBOX
-807
-10
-896
-70
+28
+518
+117
+578
 align-mod-search
 0.02
 1
@@ -1396,10 +1356,10 @@ align-mod-search
 Number
 
 INPUTBOX
-896
-10
-990
-70
+28
+577
+117
+637
 avoid-mod-search
 0.1
 1
@@ -1407,10 +1367,10 @@ avoid-mod-search
 Number
 
 INPUTBOX
-991
-10
-1075
-70
+28
+637
+117
+697
 rw-mod-search
 0.4
 1
@@ -1418,10 +1378,10 @@ rw-mod-search
 Number
 
 INPUTBOX
-707
-71
-804
-131
+117
+458
+206
+518
 attract-mod-hunt
 5.0E-4
 1
@@ -1429,10 +1389,10 @@ attract-mod-hunt
 Number
 
 INPUTBOX
-807
-71
-896
-131
+117
+518
+206
+578
 align-mod-hunt
 3.0
 1
@@ -1440,10 +1400,10 @@ align-mod-hunt
 Number
 
 INPUTBOX
-898
-71
-992
-131
+117
+577
+206
+637
 avoid-mod-hunt
 0.0
 1
@@ -1451,79 +1411,31 @@ avoid-mod-hunt
 Number
 
 INPUTBOX
-992
-71
-1075
-131
+117
+637
+206
+697
 rw-mod-hunt
 0.0
 1
 0
 Number
 
-SWITCH
-1173
-10
-1288
-43
-check-radius?
-check-radius?
-0
-1
--1000
-
-SWITCH
-1082
-10
-1175
-43
-hunt-fly?
-hunt-fly?
-0
-1
--1000
-
-SWITCH
-1082
-42
-1288
-75
-bats-per-patch?
-bats-per-patch?
-0
-1
--1000
-
-SLIDER
-15
-332
-189
-365
-foraging-radius
-foraging-radius
-0
-40
-35.0
-1
-1
-cells
-HORIZONTAL
-
 CHOOSER
-107
-376
-199
-421
+323
+651
+415
+696
 dev-steps
 dev-steps
 "none" "calibration" "evaluation"
 0
 
 SWITCH
-1082
-75
-1288
-108
+28
+233
+200
+266
 local-enhancement?
 local-enhancement?
 0
@@ -1531,21 +1443,21 @@ local-enhancement?
 -1000
 
 INPUTBOX
-211
-531
-366
-591
+28
+174
+200
+234
 soc-mod
-0.1
+0.25
 1
 0
 Number
 
 PLOT
-367
-532
-567
-682
+759
+461
+998
+596
 Ticks in networks
 NIL
 NIL
@@ -1560,10 +1472,10 @@ PENS
 "default" 1.0 1 -16777216 true "" ""
 
 PLOT
-568
-532
-768
-682
+998
+461
+1243
+596
 perc-ts-networking 
 NIL
 NIL
@@ -1576,6 +1488,46 @@ false
 "" ""
 PENS
 "default" 1.0 0 -16777216 true "" "if ticks > 8 [plotxy ticks mean perc-ts-networking ]"
+
+TEXTBOX
+33
+13
+183
+31
+Scenario settings:
+14
+0.0
+1
+
+TEXTBOX
+28
+373
+178
+391
+Calibrated parameters:
+14
+0.0
+1
+
+TEXTBOX
+761
+74
+911
+92
+Scenario output plots:
+14
+0.0
+1
+
+TEXTBOX
+231
+626
+472
+660
+Development and testing settings:
+14
+0.0
+1
 
 @#$#@#$#@
 ## ODD protocol for a bat sensory network formation model
@@ -2123,398 +2075,7 @@ NetLogo 6.2.0
 @#$#@#$#@
 @#$#@#$#@
 <experiments>
-  <experiment name="EvaluationBatMovementTracks" repetitions="25" runMetricsEveryStep="false">
-    <setup>setup</setup>
-    <go>go</go>
-    <exitCondition>not any? bats with [member? who track-list and food-found = false]</exitCondition>
-    <metric>track-outputs</metric>
-    <enumeratedValueSet variable="track-bats?">
-      <value value="true"/>
-    </enumeratedValueSet>
-    <enumeratedValueSet variable="forg-fly?">
-      <value value="true"/>
-    </enumeratedValueSet>
-    <enumeratedValueSet variable="check-radius?">
-      <value value="true"/>
-    </enumeratedValueSet>
-    <enumeratedValueSet variable="attraction-range">
-      <value value="240"/>
-    </enumeratedValueSet>
-    <enumeratedValueSet variable="n-track-bats">
-      <value value="4"/>
-    </enumeratedValueSet>
-    <enumeratedValueSet variable="alignment-range-f">
-      <value value="120"/>
-    </enumeratedValueSet>
-    <enumeratedValueSet variable="no-food-cells">
-      <value value="213"/>
-    </enumeratedValueSet>
-    <enumeratedValueSet variable="debug">
-      <value value="0"/>
-    </enumeratedValueSet>
-    <enumeratedValueSet variable="n-bats">
-      <value value="80"/>
-    </enumeratedValueSet>
-    <enumeratedValueSet variable="no-patch">
-      <value value="1"/>
-      <value value="2"/>
-      <value value="3"/>
-      <value value="5"/>
-      <value value="10"/>
-      <value value="50"/>
-      <value value="100"/>
-      <value value="200"/>
-    </enumeratedValueSet>
-    <enumeratedValueSet variable="foraging-radius">
-      <value value="35"/>
-    </enumeratedValueSet>
-    <enumeratedValueSet variable="avoidance-range">
-      <value value="0.01"/>
-    </enumeratedValueSet>
-    <enumeratedValueSet variable="null-model?">
-      <value value="false"/>
-    </enumeratedValueSet>
-    <enumeratedValueSet variable="dev-steps">
-      <value value="&quot;evaluation&quot;"/>
-    </enumeratedValueSet>
-  </experiment>
-  <experiment name="ScenarioOutputTests" repetitions="200" runMetricsEveryStep="false">
-    <setup>setup</setup>
-    <go>go</go>
-    <metric>time-to-95-food</metric>
-    <metric>food-found-ticks-list</metric>
-    <enumeratedValueSet variable="track-bats?">
-      <value value="true"/>
-    </enumeratedValueSet>
-    <enumeratedValueSet variable="forg-fly?">
-      <value value="true"/>
-    </enumeratedValueSet>
-    <enumeratedValueSet variable="check-radius?">
-      <value value="true"/>
-    </enumeratedValueSet>
-    <enumeratedValueSet variable="bats-per-patch?">
-      <value value="true"/>
-    </enumeratedValueSet>
-    <enumeratedValueSet variable="consp-find-food-auto?">
-      <value value="true"/>
-    </enumeratedValueSet>
-    <enumeratedValueSet variable="attraction-range">
-      <value value="240"/>
-    </enumeratedValueSet>
-    <enumeratedValueSet variable="alignment-range-f">
-      <value value="120"/>
-    </enumeratedValueSet>
-    <enumeratedValueSet variable="no-food-cells">
-      <value value="213"/>
-    </enumeratedValueSet>
-    <enumeratedValueSet variable="debug">
-      <value value="0"/>
-    </enumeratedValueSet>
-    <enumeratedValueSet variable="n-bats">
-      <value value="5"/>
-      <value value="10"/>
-      <value value="20"/>
-      <value value="40"/>
-      <value value="80"/>
-    </enumeratedValueSet>
-    <enumeratedValueSet variable="no-patch">
-      <value value="1"/>
-      <value value="2"/>
-      <value value="3"/>
-      <value value="5"/>
-      <value value="10"/>
-      <value value="50"/>
-      <value value="100"/>
-      <value value="200"/>
-    </enumeratedValueSet>
-    <enumeratedValueSet variable="foraging-radius">
-      <value value="35"/>
-    </enumeratedValueSet>
-    <enumeratedValueSet variable="avoidance-range">
-      <value value="0.01"/>
-    </enumeratedValueSet>
-    <enumeratedValueSet variable="null-model?">
-      <value value="true"/>
-      <value value="false"/>
-    </enumeratedValueSet>
-  </experiment>
-  <experiment name="CalibrationVectorModSearching" repetitions="25" runMetricsEveryStep="false">
-    <setup>setup</setup>
-    <go>go</go>
-    <metric>track-outputs</metric>
-    <enumeratedValueSet variable="rw-mod-for">
-      <value value="0.2"/>
-    </enumeratedValueSet>
-    <enumeratedValueSet variable="avoid-mod-for">
-      <value value="0"/>
-    </enumeratedValueSet>
-    <enumeratedValueSet variable="track-bats?">
-      <value value="false"/>
-    </enumeratedValueSet>
-    <enumeratedValueSet variable="forg-fly?">
-      <value value="true"/>
-    </enumeratedValueSet>
-    <enumeratedValueSet variable="check-radius?">
-      <value value="true"/>
-    </enumeratedValueSet>
-    <enumeratedValueSet variable="attraction-range">
-      <value value="240"/>
-    </enumeratedValueSet>
-    <enumeratedValueSet variable="attract-mod-for">
-      <value value="0"/>
-    </enumeratedValueSet>
-    <enumeratedValueSet variable="n-track-bats">
-      <value value="4"/>
-    </enumeratedValueSet>
-    <enumeratedValueSet variable="align-mod-for">
-      <value value="5"/>
-    </enumeratedValueSet>
-    <steppedValueSet variable="rw-mod-nonf" first="0.5" step="0.1" last="0.8"/>
-    <enumeratedValueSet variable="alignment-range-f">
-      <value value="120"/>
-    </enumeratedValueSet>
-    <steppedValueSet variable="attract-mod-nonf" first="0.001" step="0.005" last="0.016"/>
-    <enumeratedValueSet variable="no-food-cells">
-      <value value="213"/>
-    </enumeratedValueSet>
-    <enumeratedValueSet variable="alignment-range-nf">
-      <value value="60"/>
-      <value value="90"/>
-      <value value="120"/>
-    </enumeratedValueSet>
-    <enumeratedValueSet variable="debug">
-      <value value="0"/>
-    </enumeratedValueSet>
-    <enumeratedValueSet variable="bats-per-patch?">
-      <value value="true"/>
-    </enumeratedValueSet>
-    <steppedValueSet variable="avoid-mod-nonf" first="0.05" step="0.05" last="0.2"/>
-    <enumeratedValueSet variable="n-bats">
-      <value value="80"/>
-    </enumeratedValueSet>
-    <enumeratedValueSet variable="consp-find-food-auto?">
-      <value value="true"/>
-    </enumeratedValueSet>
-    <enumeratedValueSet variable="no-patch">
-      <value value="213"/>
-    </enumeratedValueSet>
-    <enumeratedValueSet variable="foraging-radius">
-      <value value="35"/>
-    </enumeratedValueSet>
-    <enumeratedValueSet variable="avoidance-range">
-      <value value="0.01"/>
-    </enumeratedValueSet>
-    <enumeratedValueSet variable="null-model?">
-      <value value="false"/>
-    </enumeratedValueSet>
-    <steppedValueSet variable="align-mod-nonf" first="0.01" step="0.01" last="0.04"/>
-    <enumeratedValueSet variable="dev-steps">
-      <value value="&quot;calibration&quot;"/>
-    </enumeratedValueSet>
-  </experiment>
-  <experiment name="CalibrationVectorModHunting" repetitions="25" runMetricsEveryStep="false">
-    <setup>setup</setup>
-    <go>go</go>
-    <metric>track-outputs</metric>
-    <steppedValueSet variable="rw-mod-for" first="0.05" step="0.05" last="0.2"/>
-    <steppedValueSet variable="avoid-mod-for" first="0" step="0.05" last="0.15"/>
-    <enumeratedValueSet variable="track-bats?">
-      <value value="false"/>
-    </enumeratedValueSet>
-    <enumeratedValueSet variable="forg-fly?">
-      <value value="true"/>
-    </enumeratedValueSet>
-    <enumeratedValueSet variable="check-radius?">
-      <value value="true"/>
-    </enumeratedValueSet>
-    <enumeratedValueSet variable="attraction-range">
-      <value value="240"/>
-    </enumeratedValueSet>
-    <steppedValueSet variable="attract-mod-for" first="0" step="5.0E-4" last="0.0015"/>
-    <enumeratedValueSet variable="n-track-bats">
-      <value value="4"/>
-    </enumeratedValueSet>
-    <steppedValueSet variable="align-mod-for" first="1" step="2" last="7"/>
-    <enumeratedValueSet variable="rw-mod-nonf">
-      <value value="0.6"/>
-    </enumeratedValueSet>
-    <enumeratedValueSet variable="alignment-range-f">
-      <value value="60"/>
-      <value value="90"/>
-      <value value="120"/>
-    </enumeratedValueSet>
-    <enumeratedValueSet variable="attract-mod-nonf">
-      <value value="0.006"/>
-    </enumeratedValueSet>
-    <enumeratedValueSet variable="no-food-cells">
-      <value value="213"/>
-    </enumeratedValueSet>
-    <enumeratedValueSet variable="alignment-range-nf">
-      <value value="60"/>
-    </enumeratedValueSet>
-    <enumeratedValueSet variable="debug">
-      <value value="0"/>
-    </enumeratedValueSet>
-    <enumeratedValueSet variable="bats-per-patch?">
-      <value value="true"/>
-    </enumeratedValueSet>
-    <enumeratedValueSet variable="avoid-mod-nonf">
-      <value value="0.15"/>
-    </enumeratedValueSet>
-    <enumeratedValueSet variable="n-bats">
-      <value value="80"/>
-    </enumeratedValueSet>
-    <enumeratedValueSet variable="consp-find-food-auto?">
-      <value value="true"/>
-    </enumeratedValueSet>
-    <enumeratedValueSet variable="no-patch">
-      <value value="213"/>
-    </enumeratedValueSet>
-    <enumeratedValueSet variable="foraging-radius">
-      <value value="35"/>
-    </enumeratedValueSet>
-    <enumeratedValueSet variable="avoidance-range">
-      <value value="0.01"/>
-    </enumeratedValueSet>
-    <enumeratedValueSet variable="null-model?">
-      <value value="false"/>
-    </enumeratedValueSet>
-    <enumeratedValueSet variable="align-mod-nonf">
-      <value value="0.03"/>
-    </enumeratedValueSet>
-    <enumeratedValueSet variable="dev-steps">
-      <value value="&quot;calibration&quot;"/>
-    </enumeratedValueSet>
-  </experiment>
-  <experiment name="ScenarioOutputRevNULL" repetitions="500" runMetricsEveryStep="false">
-    <setup>setup</setup>
-    <go>go</go>
-    <metric>time-to-95-food</metric>
-    <metric>food-found-ticks-list</metric>
-    <metric>network-sizes</metric>
-    <metric>nearest-neighbor-distance</metric>
-    <enumeratedValueSet variable="track-bats?">
-      <value value="true"/>
-    </enumeratedValueSet>
-    <enumeratedValueSet variable="hunt-fly?">
-      <value value="true"/>
-    </enumeratedValueSet>
-    <enumeratedValueSet variable="check-radius?">
-      <value value="true"/>
-    </enumeratedValueSet>
-    <enumeratedValueSet variable="bats-per-patch?">
-      <value value="true"/>
-    </enumeratedValueSet>
-    <enumeratedValueSet variable="local-enhancement?">
-      <value value="true"/>
-      <value value="false"/>
-    </enumeratedValueSet>
-    <enumeratedValueSet variable="attraction-range">
-      <value value="240"/>
-    </enumeratedValueSet>
-    <enumeratedValueSet variable="alignment-range-hunt">
-      <value value="120"/>
-    </enumeratedValueSet>
-    <enumeratedValueSet variable="no-food-cells">
-      <value value="213"/>
-    </enumeratedValueSet>
-    <enumeratedValueSet variable="debug">
-      <value value="0"/>
-    </enumeratedValueSet>
-    <enumeratedValueSet variable="n-bats">
-      <value value="5"/>
-      <value value="10"/>
-      <value value="20"/>
-      <value value="40"/>
-      <value value="80"/>
-      <value value="160"/>
-    </enumeratedValueSet>
-    <enumeratedValueSet variable="no-patch">
-      <value value="1"/>
-      <value value="2"/>
-      <value value="4"/>
-      <value value="8"/>
-      <value value="16"/>
-      <value value="32"/>
-      <value value="64"/>
-      <value value="128"/>
-      <value value="213"/>
-    </enumeratedValueSet>
-    <enumeratedValueSet variable="foraging-radius">
-      <value value="35"/>
-    </enumeratedValueSet>
-    <enumeratedValueSet variable="avoidance-range">
-      <value value="0.01"/>
-    </enumeratedValueSet>
-    <enumeratedValueSet variable="null-model?">
-      <value value="true"/>
-    </enumeratedValueSet>
-  </experiment>
-  <experiment name="ScenarioOutputRevNetworks" repetitions="500" runMetricsEveryStep="false">
-    <setup>setup</setup>
-    <go>go</go>
-    <metric>time-to-95-food</metric>
-    <metric>food-found-ticks-list</metric>
-    <metric>network-sizes</metric>
-    <metric>nearest-neighbor-distance</metric>
-    <enumeratedValueSet variable="track-bats?">
-      <value value="true"/>
-    </enumeratedValueSet>
-    <enumeratedValueSet variable="hunt-fly?">
-      <value value="true"/>
-    </enumeratedValueSet>
-    <enumeratedValueSet variable="check-radius?">
-      <value value="true"/>
-    </enumeratedValueSet>
-    <enumeratedValueSet variable="bats-per-patch?">
-      <value value="true"/>
-    </enumeratedValueSet>
-    <enumeratedValueSet variable="local-enhancement?">
-      <value value="true"/>
-      <value value="false"/>
-    </enumeratedValueSet>
-    <enumeratedValueSet variable="attraction-range">
-      <value value="240"/>
-    </enumeratedValueSet>
-    <enumeratedValueSet variable="alignment-range-hunt">
-      <value value="120"/>
-    </enumeratedValueSet>
-    <enumeratedValueSet variable="no-food-cells">
-      <value value="213"/>
-    </enumeratedValueSet>
-    <enumeratedValueSet variable="debug">
-      <value value="0"/>
-    </enumeratedValueSet>
-    <enumeratedValueSet variable="n-bats">
-      <value value="5"/>
-      <value value="10"/>
-      <value value="20"/>
-      <value value="40"/>
-      <value value="80"/>
-      <value value="160"/>
-    </enumeratedValueSet>
-    <enumeratedValueSet variable="no-patch">
-      <value value="1"/>
-      <value value="2"/>
-      <value value="4"/>
-      <value value="8"/>
-      <value value="16"/>
-      <value value="32"/>
-      <value value="64"/>
-      <value value="128"/>
-      <value value="213"/>
-    </enumeratedValueSet>
-    <enumeratedValueSet variable="foraging-radius">
-      <value value="35"/>
-    </enumeratedValueSet>
-    <enumeratedValueSet variable="avoidance-range">
-      <value value="0.01"/>
-    </enumeratedValueSet>
-    <enumeratedValueSet variable="null-model?">
-      <value value="false"/>
-    </enumeratedValueSet>
-  </experiment>
-  <experiment name="JoVE experiment" repetitions="500" runMetricsEveryStep="false">
+  <experiment name="JoVE Experiment" repetitions="500" runMetricsEveryStep="false">
     <setup>setup</setup>
     <go>go</go>
     <metric>time-to-95-food</metric>
@@ -2523,93 +2084,22 @@ NetLogo 6.2.0
     <metric>nearest-neighbor-distance</metric>
     <metric>consecutive-networking-ts</metric>
     <metric>perc-ts-networking</metric>
-    <enumeratedValueSet variable="align-mod-hunt">
-      <value value="3"/>
-    </enumeratedValueSet>
-    <enumeratedValueSet variable="track-bats?">
-      <value value="true"/>
-    </enumeratedValueSet>
-    <enumeratedValueSet variable="check-radius?">
-      <value value="true"/>
-    </enumeratedValueSet>
-    <enumeratedValueSet variable="alignment-range-hunt">
-      <value value="120"/>
-    </enumeratedValueSet>
-    <enumeratedValueSet variable="attraction-range">
-      <value value="240"/>
-    </enumeratedValueSet>
-    <enumeratedValueSet variable="n-track-bats">
-      <value value="20"/>
-    </enumeratedValueSet>
-    <enumeratedValueSet variable="align-mod-search">
-      <value value="0.02"/>
-    </enumeratedValueSet>
-    <enumeratedValueSet variable="no-food-cells">
-      <value value="213"/>
-    </enumeratedValueSet>
-    <enumeratedValueSet variable="hunt-fly?">
-      <value value="true"/>
-    </enumeratedValueSet>
-    <enumeratedValueSet variable="dev-steps">
-      <value value="&quot;none&quot;"/>
-    </enumeratedValueSet>
-    <enumeratedValueSet variable="rw-mod-search">
-      <value value="0.4"/>
-    </enumeratedValueSet>
-    <enumeratedValueSet variable="rw-mod-hunt">
-      <value value="0"/>
-    </enumeratedValueSet>
-    <enumeratedValueSet variable="attract-mod-hunt">
-      <value value="5.0E-4"/>
-    </enumeratedValueSet>
-    <enumeratedValueSet variable="avoid-mod-hunt">
-      <value value="0"/>
-    </enumeratedValueSet>
-    <enumeratedValueSet variable="debug">
-      <value value="0"/>
-    </enumeratedValueSet>
-    <enumeratedValueSet variable="bats-per-patch?">
-      <value value="true"/>
-    </enumeratedValueSet>
-    <enumeratedValueSet variable="n-bats">
-      <value value="80"/>
-    </enumeratedValueSet>
-    <enumeratedValueSet variable="alignment-range-search">
-      <value value="60"/>
-    </enumeratedValueSet>
-    <enumeratedValueSet variable="local-enhancement?">
-      <value value="true"/>
-    </enumeratedValueSet>
     <enumeratedValueSet variable="no-patch">
       <value value="1"/>
-      <value value="4"/>
-      <value value="16"/>
-      <value value="64"/>
+      <value value="3"/>
+      <value value="9"/>
+      <value value="27"/>
+      <value value="81"/>
       <value value="213"/>
     </enumeratedValueSet>
-    <enumeratedValueSet variable="foraging-radius">
-      <value value="35"/>
-    </enumeratedValueSet>
-    <enumeratedValueSet variable="avoidance-range">
-      <value value="0.01"/>
-    </enumeratedValueSet>
-    <enumeratedValueSet variable="attract-mod-search">
-      <value value="0.006"/>
-    </enumeratedValueSet>
-    <enumeratedValueSet variable="avoid-mod-search">
-      <value value="0.1"/>
-    </enumeratedValueSet>
     <enumeratedValueSet variable="null-model?">
+      <value value="true"/>
       <value value="false"/>
     </enumeratedValueSet>
     <enumeratedValueSet variable="soc-mod">
-      <value value="0.1"/>
-      <value value="0.4"/>
-      <value value="0.7"/>
+      <value value="0.25"/>
       <value value="1"/>
       <value value="4"/>
-      <value value="7"/>
-      <value value="10"/>
     </enumeratedValueSet>
   </experiment>
 </experiments>
